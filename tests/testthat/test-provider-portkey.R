@@ -39,3 +39,39 @@ test_that("virtual_key is deprecated", {
   expect_snapshot(chat <- chat_portkey(model = "def", virtual_key = "abc"))
   expect_equal(chat$get_provider()@model, "@abc/def")
 })
+
+test_that("structured output fails with clear error for Anthropic models", {
+  chat <- chat_portkey(
+    model = "@vertexai/anthropic.claude-opus-4-6",
+    credentials = function() "fake-key"
+  )
+  type <- type_object(x = type_string())
+  expect_error(
+    chat$chat_structured("test", type = type),
+    "Structured output is not supported for Anthropic models"
+  )
+
+  # Direct Anthropic provider routing should also error
+  chat2 <- chat_portkey(
+    model = "@anthropic/claude-3-5-sonnet",
+    credentials = function() "fake-key"
+  )
+  expect_error(
+    chat2$chat_structured("test", type = type),
+    "Structured output is not supported for Anthropic models"
+  )
+})
+
+test_that("non-Anthropic models are not blocked from structured output", {
+  provider <- ProviderPortkeyAI(
+    name = "PortkeyAI",
+    base_url = "https://api.portkey.ai/v1",
+    model = "@vertexai/gemini-2.5-flash-lite",
+    params = params(),
+    credentials = function() "fake-key"
+  )
+  type <- type_object(x = type_string())
+  # Should not throw an Anthropic-specific error (builds the body without error)
+  body <- chat_body(provider, stream = FALSE, turns = list(), type = type)
+  expect_true(!is.null(body$response_format))
+})

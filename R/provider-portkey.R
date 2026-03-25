@@ -5,6 +5,13 @@
 #' provides an interface (AI Gateway) to connect through its Universal API to a
 #' variety of LLMs providers via a single endpoint.
 #'
+#' ## Known limitations
+#'
+#' * Structured data extraction via `$chat_structured()` is not supported for
+#'   Anthropic (Claude) models, as the OpenAI-compatible `response_format` field
+#'   is not accepted by Anthropic endpoints. Use [chat_anthropic()] to access
+#'   Claude models directly with structured output support.
+#'
 #' @family chatbots
 #' @param model The model name, e.g. `@my-provider/my-model`.
 #' @param api_key `r lifecycle::badge("deprecated")` Use `credentials` instead.
@@ -93,6 +100,30 @@ ProviderPortkeyAI <- new_class(
   "ProviderPortkeyAI",
   parent = ProviderOpenAICompatible
 )
+
+method(chat_body, ProviderPortkeyAI) <- function(
+  provider,
+  stream = TRUE,
+  turns = list(),
+  tools = list(),
+  type = NULL
+) {
+  if (!is.null(type) && grepl("@anthropic/|anthropic\\.", provider@model, ignore.case = TRUE)) {
+    cli::cli_abort(c(
+      "Structured output is not supported for Anthropic models routed through {.pkg PortkeyAI}.",
+      "i" = "The OpenAI-compatible {.code response_format} field is not accepted by Anthropic endpoints.",
+      "i" = "Use {.fn chat_anthropic} to access Claude models directly with structured output support."
+    ))
+  }
+
+  chat_body(
+    super(provider, ProviderOpenAICompatible),
+    stream = stream,
+    turns = turns,
+    tools = tools,
+    type = type
+  )
+}
 
 portkey_key <- function() {
   key_get("PORTKEY_API_KEY")
