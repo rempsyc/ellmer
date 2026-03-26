@@ -11,8 +11,13 @@
 #'
 #' @param chat A chat object created by a `chat_` function, or a
 #'   string passed to [chat()].
-#' @param prompts A vector created by [interpolate()] or a list
-#'   of character vectors.
+#' @param prompts A vector created by [interpolate()] or a list of prompts.
+#'   Each element can be:
+#'   * A single string for a one-turn conversation.
+#'   * A list of strings for a multi-turn conversation, where each string
+#'     becomes a separate user turn appended to the base chat.
+#'   * A [Content] object for a single turn with non-text content.
+#'   * A list of [Turn] objects for an explicit multi-turn sequence.
 #' @param max_active The maximum number of simultaneous requests to send.
 #'
 #'   For [chat_anthropic()], note that the number of active connections is
@@ -62,6 +67,16 @@
 #' )
 #' type_person <- type_object(name = type_string(), age = type_number())
 #' parallel_chat_structured(chat, prompts, type_person)
+#'
+#' # Multi-turn structured data ------------------------------------------------
+#' # Each element of prompts is a list of strings, each string a separate turn.
+#' prompts_multi <- list(
+#'   list("I go by Alex. 42 years on this planet and counting.",
+#'        "What is my name and age?"),
+#'   list("Pleased to meet you! I'm Jamal, age 27.",
+#'        "What is my name and age?")
+#' )
+#' parallel_chat_structured(chat, prompts_multi, type_person)
 #' \dontshow{ellmer:::vcr_example_end()}
 parallel_chat <- function(
   chat,
@@ -85,9 +100,9 @@ parallel_chat <- function(
   }
 
   # First build up list of cumulative conversations
-  user_turns <- as_user_turns(prompts)
+  conversation_suffixes <- as_conversation_suffixes(prompts)
   existing <- chat$get_turns(include_system_prompt = TRUE)
-  conversations <- append_turns(list(existing), user_turns)
+  conversations <- map(conversation_suffixes, function(suffix) c(existing, suffix))
 
   # Now get the assistant's response
   assistant_turns <- my_parallel_turns(conversations)
@@ -117,7 +132,7 @@ parallel_chat <- function(
       tool_turns[needs_iter]
     )
 
-    assistant_turns <- vector("list", length(user_turns))
+    assistant_turns <- vector("list", length(conversation_suffixes))
     assistant_turns[needs_iter] <- my_parallel_turns(conversations[needs_iter])
     is_ok[needs_iter] <- !map_lgl(assistant_turns[needs_iter], turn_failed)
   }
@@ -184,7 +199,6 @@ parallel_chat_structured <- function(
   on_error = c("return", "continue", "stop")
 ) {
   chat <- as_chat(chat)
-  turns <- as_user_turns(prompts)
   check_bool(convert)
   on_error <- arg_match(on_error)
 
@@ -192,9 +206,9 @@ parallel_chat_structured <- function(
   needs_wrapper <- type_needs_wrapper(type, provider)
 
   # First build up list of cumulative conversations
-  user_turns <- as_user_turns(prompts)
+  conversation_suffixes <- as_conversation_suffixes(prompts)
   existing <- chat$get_turns(include_system_prompt = TRUE)
-  conversations <- append_turns(list(existing), user_turns)
+  conversations <- map(conversation_suffixes, function(suffix) c(existing, suffix))
 
   turns <- parallel_turns(
     provider = provider,
@@ -294,6 +308,50 @@ append_turns <- function(old_turns, new_turns) {
       old
     } else {
       c(old, list(new))
+    }
+  })
+}
+
+# Convert prompts to a list of conversation suffixes (each a list of Turns).
+# Supports:
+#   - Single string → one UserTurn
+#   - Content object → one UserTurn
+#   - Turn object → one Turn (used as-is)
+#   - List of all strings → multiple UserTurns (multi-turn)
+#   - List of all Turn objects → multiple Turns (multi-turn, explicit)
+#   - List with Content objects → one UserTurn with multiple content items
+as_conversation_suffixes <- function(
+  prompts,
+  call = caller_env(),
+  arg = caller_arg(prompts)
+) {
+  if (!is.list(prompts) && !is_prompt(prompts)) {
+    stop_input_type(prompts, "a list or prompt", call = call, arg = arg)
+  }
+  map(seq_along(prompts), function(i) {
+    item <- prompts[[i]]
+    this_arg <- paste0(arg, "[[", i, "]]")
+
+    if (is.list(item) && length(item) > 0) {
+      all_strings <- all(map_lgl(item, is.character))
+      all_turns <- all(map_lgl(item, \(x) S7_inherits(x, Turn)))
+
+      if (all_strings) {
+        # Multi-turn: each string is a separate user turn
+        map(item, function(s) as_user_turn(list(s), call = call, arg = this_arg))
+      } else if (all_turns) {
+        # Multi-turn: already Turn objects, use as-is
+        item
+      } else {
+        # Single turn with multiple content items (existing behaviour)
+        list(as_user_turn(item, call = call, arg = this_arg))
+      }
+    } else if (S7_inherits(item, Turn)) {
+      # Already a Turn object: wrap in list
+      list(item)
+    } else {
+      # Single string, Content, or other scalar: create one UserTurn
+      list(as_user_turn(item, call = call, arg = this_arg))
     }
   })
 }

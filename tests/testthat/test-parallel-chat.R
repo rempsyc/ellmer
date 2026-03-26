@@ -230,3 +230,130 @@ test_that("assistant turns track duration in parallel", {
   expect_true(is.na(assistant_duration_1) || assistant_duration_1 > 0)
   expect_true(is.na(assistant_duration_2) || assistant_duration_2 > 0)
 })
+
+# multi-turn prompts -----------------------------------------------------------
+
+test_that("as_conversation_suffixes handles single-turn prompts", {
+  suffixes <- as_conversation_suffixes(list("hello", "world"))
+  expect_length(suffixes, 2)
+  expect_length(suffixes[[1]], 1)
+  expect_length(suffixes[[2]], 1)
+  expect_s7_class(suffixes[[1]][[1]], UserTurn)
+  expect_s7_class(suffixes[[2]][[1]], UserTurn)
+  expect_equal(suffixes[[1]][[1]]@text, "hello")
+  expect_equal(suffixes[[2]][[1]]@text, "world")
+})
+
+test_that("as_conversation_suffixes handles multi-turn string lists", {
+  suffixes <- as_conversation_suffixes(list(
+    list("context A", "question A"),
+    list("context B", "question B")
+  ))
+  expect_length(suffixes, 2)
+  # Each suffix has two turns
+  expect_length(suffixes[[1]], 2)
+  expect_length(suffixes[[2]], 2)
+  expect_s7_class(suffixes[[1]][[1]], UserTurn)
+  expect_s7_class(suffixes[[1]][[2]], UserTurn)
+  expect_equal(suffixes[[1]][[1]]@text, "context A")
+  expect_equal(suffixes[[1]][[2]]@text, "question A")
+  expect_equal(suffixes[[2]][[1]]@text, "context B")
+  expect_equal(suffixes[[2]][[2]]@text, "question B")
+})
+
+test_that("as_conversation_suffixes handles explicit Turn objects", {
+  turns <- list(UserTurn("turn1"), UserTurn("turn2"))
+  suffixes <- as_conversation_suffixes(list(turns))
+  expect_length(suffixes, 1)
+  expect_length(suffixes[[1]], 2)
+  expect_s7_class(suffixes[[1]][[1]], UserTurn)
+  expect_equal(suffixes[[1]][[1]]@text, "turn1")
+  expect_equal(suffixes[[1]][[2]]@text, "turn2")
+})
+
+test_that("as_conversation_suffixes keeps mixed Content lists as single turn", {
+  img <- content_image_url("https://example.com/img.png")
+  suffixes <- as_conversation_suffixes(list(list(img, "describe it")))
+  expect_length(suffixes, 1)
+  # Should be a single turn with 2 content items
+  expect_length(suffixes[[1]], 1)
+  expect_s7_class(suffixes[[1]][[1]], UserTurn)
+  expect_length(suffixes[[1]][[1]]@contents, 2)
+})
+
+test_that("multi-turn parallel_chat builds correct conversations", {
+  chat <- chat_openai(
+    credentials = \() "test-key",
+    base_url = "http://localhost:1234",
+    model = "mock"
+  )
+
+  prompts <- list(
+    list("context 1", "question 1"),
+    list("context 2", "question 2")
+  )
+
+  captured_conversations <- NULL
+  local_mocked_bindings(
+    parallel_turns = function(provider, conversations, ...) {
+      captured_conversations <<- conversations
+      list(
+        AssistantTurn("answer 1", tokens = c(10, 10, 0)),
+        AssistantTurn("answer 2", tokens = c(10, 10, 0))
+      )
+    }
+  )
+
+  chats <- parallel_chat(chat, prompts)
+
+  # Each conversation should have system turn + 2 user turns
+  expect_length(captured_conversations, 2)
+  conv1_roles <- map_chr(captured_conversations[[1]], \(t) t@role)
+  expect_equal(conv1_roles, c("system", "user", "user"))
+  expect_equal(captured_conversations[[1]][[2]]@text, "context 1")
+  expect_equal(captured_conversations[[1]][[3]]@text, "question 1")
+  expect_equal(captured_conversations[[2]][[2]]@text, "context 2")
+  expect_equal(captured_conversations[[2]][[3]]@text, "question 2")
+})
+
+test_that("multi-turn parallel_chat_structured builds correct conversations", {
+  chat <- chat_openai(
+    credentials = \() "test-key",
+    base_url = "http://localhost:1234",
+    model = "mock"
+  )
+
+  prompts <- list(
+    list("I am Democrat Joe, age 30.", "What is my name and age?"),
+    list("I am Republican Jane, age 40.", "What is my name and age?")
+  )
+
+  captured_conversations <- NULL
+  local_mocked_bindings(
+    parallel_turns = function(provider, conversations, ...) {
+      captured_conversations <<- conversations
+      list(
+        AssistantTurn(list(ContentJson(list(name = "Joe", age = 30))),
+                      tokens = c(10, 10, 0)),
+        AssistantTurn(list(ContentJson(list(name = "Jane", age = 40))),
+                      tokens = c(10, 10, 0))
+      )
+    }
+  )
+
+  type <- type_object(name = type_string(), age = type_integer())
+  out <- parallel_chat_structured(chat, prompts, type)
+
+  # Each conversation should have system turn + 2 user turns
+  expect_length(captured_conversations, 2)
+  conv1_roles <- map_chr(captured_conversations[[1]], \(t) t@role)
+  expect_equal(conv1_roles, c("system", "user", "user"))
+  expect_equal(captured_conversations[[1]][[2]]@text, "I am Democrat Joe, age 30.")
+  expect_equal(captured_conversations[[1]][[3]]@text, "What is my name and age?")
+
+  # Output data
+  expect_s3_class(out, "data.frame")
+  expect_equal(nrow(out), 2)
+  expect_equal(out$name, c("Joe", "Jane"))
+  expect_equal(out$age, c(30L, 40L))
+})
